@@ -1470,6 +1470,7 @@ const DESIGNS = [
     difficulty: 3,
     duration: '3-4h',
     surface: '0.7-1.2 m²',
+    efficiency: 0.75,
     materials: [
       'Antenne parabolique (60-120cm de diametre)',
       'Film miroir adhesif ou papier alu + colle',
@@ -1545,6 +1546,7 @@ const DESIGNS = [
     difficulty: 1,
     duration: '1-2h',
     surface: '0.3-0.5 m²',
+    efficiency: 0.55,
     materials: [
       'Gros carton (type demenagement ou electromenager)',
       'Deuxieme carton legerement plus petit',
@@ -1619,6 +1621,7 @@ const DESIGNS = [
     difficulty: 2,
     duration: '2-3h',
     surface: '0.5-0.8 m²',
+    efficiency: 0.60,
     materials: [
       'Grand parapluie (80cm+ ouvert, structure intacte)',
       'Film miroir adhesif ou nombreux petits miroirs',
@@ -1685,6 +1688,7 @@ const DESIGNS = [
     difficulty: 1,
     duration: '1.5-2h',
     surface: '0.6-0.8 m²',
+    efficiency: 0.50,
     materials: [
       'Carton rigide (type emballage d\'electromenager)',
       'Papier aluminium (2 rouleaux)',
@@ -1747,10 +1751,11 @@ const DESIGNS = [
     desc: 'Récupérée d\'un ancien téléviseur rear-projection. Concentration extreme, jusqu\'à 600°C au foyer.',
     tempMax: 600,
     tempMin: 200,
-    power: 1200,
+    power: 500,
     difficulty: 2,
     duration: '1-2h',
     surface: '0.4-0.7 m²',
+    efficiency: 0.80,
     materials: [
       'Lentille de Fresnel (TV rear-projection 100-130cm)',
       'Cadre en bois ou metal (ancien cadre de tableau)',
@@ -2690,12 +2695,15 @@ function calculateSolar() {
   const lat = parseFloat(document.getElementById('calcLat').value) || 48.85;
   const lon = parseFloat(document.getElementById('calcLon').value) || 2.35;
   const month = parseInt(document.getElementById('calcMonth').value);
-  const day = Math.min(parseInt(document.getElementById('calcDay').value) || 21, 28);
+  const year = new Date().getFullYear();
+  const daysInMonth = new Date(year, month + 1, 0).getDate();
+  const day = Math.min(parseInt(document.getElementById('calcDay').value) || 21, daysInMonth);
+  document.getElementById('calcDay').value = day;
   const hour = parseFloat(document.getElementById('calcHour').value) || 12;
   const clouds = parseInt(document.getElementById('calcClouds').value) || 0;
 
   // Jour de l'année
-  const dayOfYear = Math.floor((new Date(2024, month, day) - new Date(2024, 0, 0)) / 86400000);
+  const dayOfYear = Math.floor((new Date(year, month, day) - new Date(year, 0, 0)) / 86400000);
 
   // Déclinaison solaire (formule de Cooper)
   const declination = 23.45 * Math.sin((360 / 365) * (dayOfYear - 81)) * Math.PI / 180;
@@ -2725,7 +2733,8 @@ function calculateSolar() {
   // Puissance du four sélectionné
   const d = DESIGNS[selectedDesign];
   const surfaceFactor = parseFloat(d.surface) || 0.5;
-  const ovenPower = Math.round(irradiance * surfaceFactor);
+  const efficiency = d.efficiency || 0.6;
+  const ovenPower = Math.round(irradiance * surfaceFactor * efficiency);
 
   // Affichage
   document.getElementById('resElevation').textContent = elevation > 0 ? elevation.toFixed(1) + '°' : 'Sous horizon';
@@ -2900,13 +2909,24 @@ function updateCookingDetails() {
   document.getElementById('detailTemp').textContent = food.temp + '°C (cible)';
   document.getElementById('detailTip').textContent = food.tip;
 
+  const ovenTooCold = oven.tempMax < food.temp;
   const effectiveTemp = Math.min(food.temp, oven.tempMax);
   const timeFactor = food.temp / Math.max(effectiveTemp, 50);
   const totalTime = Math.round(food.timePer500g * (qty / 500) * timeFactor);
-  document.getElementById('estTotalTime').textContent = formatTime(totalTime * 60);
-  document.getElementById('simTargetTemp').textContent = effectiveTemp + '°C';
 
-  const powerNeeded = Math.round((qty * 4.186 * (food.temp - 25)) / (totalTime * 60));
+  if (ovenTooCold) {
+    document.getElementById('estTotalTime').textContent = formatTime(totalTime * 60) + ' *';
+    document.getElementById('estTotalTime').style.color = 'var(--accent3)';
+    document.getElementById('simTargetTemp').textContent = effectiveTemp + '°C (max four)';
+    document.getElementById('detailTip').textContent = food.tip + ' ATTENTION : ce four ne peut pas atteindre la temperature necessaire. La cuisson sera incomplete ou impossible.';
+  } else {
+    document.getElementById('estTotalTime').textContent = formatTime(totalTime * 60);
+    document.getElementById('estTotalTime').style.color = 'var(--accent2)';
+    document.getElementById('simTargetTemp').textContent = effectiveTemp + '°C';
+    document.getElementById('detailTip').textContent = food.tip;
+  }
+
+  const powerNeeded = Math.round((qty * 4.186 * (effectiveTemp - 25)) / (totalTime * 60));
   document.getElementById('detailPower').textContent = powerNeeded + ' W (estime)';
 }
 
@@ -2931,12 +2951,21 @@ function startCookingSim() {
   cookingSim.running = true;
   cookingSim.paused = false;
   document.getElementById('pauseBtn').disabled = false;
-  document.getElementById('cookStatus').textContent = 'Cuisson en cours...';
-  updateCookingDetails();
 
   const oven = DESIGNS[selectedOvenForSim];
   const food = FOODS[selectedFood];
   const targetTemp = Math.min(food.temp, oven.tempMax);
+  const ovenTooCold = oven.tempMax < food.temp;
+
+  if (ovenTooCold) {
+    document.getElementById('cookStatus').textContent = 'ATTENTION : four sous-dimensionne, cuisson incomplete';
+    document.getElementById('cookStatus').style.color = 'var(--accent3)';
+  } else {
+    document.getElementById('cookStatus').textContent = 'Cuisson en cours...';
+    document.getElementById('cookStatus').style.color = 'var(--fg)';
+  }
+  updateCookingDetails();
+
   const qty = parseInt(document.getElementById('foodQty').value) || 500;
   const timeFactor = food.temp / Math.max(targetTemp, 50);
   const totalSimSeconds = Math.round(food.timePer500g * (qty / 500) * timeFactor * 60);

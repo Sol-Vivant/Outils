@@ -172,6 +172,31 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:18px;heigh
   <!-- KPI -->
   <div class="kg" id="kpiG" style="margin-bottom:1rem"></div>
 
+  <!-- Simulateur instantané -->
+  <div style="background:var(--card);border:1px solid var(--border);border-radius:10px;padding:1rem;margin-bottom:1rem" id="simCard">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:.7rem;flex-wrap:wrap;gap:.4rem">
+      <h3 style="font-size:.85rem;color:var(--fg)"><i class="fa-solid fa-flask" style="margin-right:.4rem;color:var(--accent)"></i>Simulateur instantané</h3>
+      <span style="font-size:.6rem;color:var(--muted)">Choisissez un mois et une température extérieure</span>
+    </div>
+    <div style="display:flex;gap:.8rem;flex-wrap:wrap;align-items:flex-end;margin-bottom:.8rem">
+      <div>
+        <label style="font-size:.65rem;color:var(--muted);display:block;margin-bottom:.2rem">Mois</label>
+        <select id="iSimMois" style="width:auto;min-width:110px">
+          <option value="0">Janvier</option><option value="1">Février</option><option value="2">Mars</option>
+          <option value="3">Avril</option><option value="4">Mai</option><option value="5">Juin</option>
+          <option value="6">Juillet</option><option value="7">Août</option><option value="8">Septembre</option>
+          <option value="9">Octobre</option><option value="10">Novembre</option><option value="11">Décembre</option>
+        </select>
+      </div>
+      <div style="flex:1;min-width:180px">
+        <label style="font-size:.65rem;color:var(--muted);display:block;margin-bottom:.2rem">T° extérieure : <span id="vSimT" style="color:var(--accent);font-weight:600">20</span> °C</label>
+        <input type="range" id="iSimT" min="-15" max="45" value="20" step="0.5">
+        <div class="slider-labels"><span>-15</span><span>45 °C</span></div>
+      </div>
+    </div>
+    <div id="simRes"></div>
+  </div>
+
   <!-- Graphique -->
   <div style="background:var(--card);border:1px solid var(--border);border-radius:10px;padding:1rem;margin-bottom:1rem">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:.6rem;flex-wrap:wrap;gap:.4rem">
@@ -308,11 +333,45 @@ const S = {
 function cVol(){ return S.surface * HP * S.etages; }
 function cDRec(){ return Math.round(cVol() * REN[S.standard]); }
 
-function cTSoilAtDepth(airTemp){
+/* Soil temperature at pipe depth for a given month (0=Jan..11=Dec) using sinusoidal annual model with phase lag */
+function cTSoilMonth(monthIdx){
   const z = ZONES[S.zoneClim];
   const D = SOLS[S.typeSol].damp;
-  const r = Math.exp(-S.profondeur / D);
-  return z.tSol + (airTemp - z.tSol) * r;
+  const A0 = (z.tEte - z.tHiv) / 2;
+  const doy = [15,45,74,105,135,166,196,227,258,288,318,348][monthIdx];
+  const doyMax = 196;
+  const omega = 2 * Math.PI / 365;
+  return z.tSol + A0 * Math.exp(-S.profondeur / D) * Math.cos(omega * (doy - doyMax) - S.profondeur / D);
+}
+
+/* Outlet temperature for a given month */
+function cTOutMonth(monthIdx){
+  const L = cLPT();
+  const lam = cLam();
+  const tAir = ZONES[S.zoneClim].tm[monthIdx];
+  const tSol = cTSoilMonth(monthIdx);
+  return tSol + (tAir - tSol) * Math.exp(-L / lam);
+}
+
+/* Soil temperature at pipe depth for an extreme condition (hiver ou été) with phase lag */
+function cTSoilExt(isWinter){
+  const z = ZONES[S.zoneClim];
+  const D = SOLS[S.typeSol].damp;
+  const A0 = (z.tEte - z.tHiv) / 2;
+  const doy = isWinter ? 15 : 196;
+  const doyMax = 196;
+  const omega = 2 * Math.PI / 365;
+  return z.tSol + A0 * Math.exp(-S.profondeur / D) * Math.cos(omega * (doy - doyMax) - S.profondeur / D);
+}
+
+/* Outlet temperature for an extreme condition (hiver ou été) */
+function cTOutExt(isWinter){
+  const z = ZONES[S.zoneClim];
+  const tExt = isWinter ? z.tHiv : z.tEte;
+  const tSol = cTSoilExt(isWinter);
+  const L = cLPT();
+  const lam = cLam();
+  return tSol + (tExt - tSol) * Math.exp(-L / lam);
 }
 
 function cVit(){
@@ -335,13 +394,6 @@ function cLam(){
   return v > 0.01 ? (1.2 * 1005 * A * v) / (P * U) : 9999;
 }
 
-function cTOut(tExt){
-  const L = cLPT();
-  const lam = cLam();
-  const tSolDepth = cTSoilAtDepth(tExt);
-  return tSolDepth + (tExt - tSolDepth) * Math.exp(-L / lam);
-}
-
 function cDP(){
   const d = S.diametre / 1000;
   const v = cVit();
@@ -359,22 +411,39 @@ function cPVent(){
   return Math.max(dp * Q / 0.6, 0);
 }
 
+/* Energy savings via monthly integration with comfort thresholds */
 function cEco(){
   const z = ZONES[S.zoneClim];
-  const tOH = cTOut(z.tHiv);
-  const tOE = cTOut(z.tEte);
-  const gH = 1.2*1005*(S.debit/3600)*Math.max(tOH-z.tHiv,0)*z.hC/1000;
-  const gE = 1.2*1005*(S.debit/3600)*Math.max(z.tEte-tOE,0)*z.hF/1000;
   const pV = cPVent();
-  const cVH = pV * z.hC / 1000;
-  const cVE = pV * z.hF / 1000;
+  const Q = S.debit / 3600;
+  const days = [31,28,31,30,31,30,31,31,30,31,30,31];
+  let hiv = 0, ete = 0, cV = 0;
 
-  let hiv=0, ete=0, cV=0;
-  if(S.typePuits==='canadien')   { hiv=gH; cV=cVH; }
-  else if(S.typePuits==='provencal') { ete=gE; cV=cVE; }
-  else                           { hiv=gH; ete=gE; cV=cVH+cVE; }
-
+  for(let m = 0; m < 12; m++){
+    if(!isActiveMonth(m)) continue;
+    const tAir = z.tm[m];
+    const tOut = cTOutMonth(m);
+    const hours = days[m] * 24;
+    if(tOut > tAir && tAir < 20){ hiv += 1.2 * 1005 * Q * (tOut - tAir) * hours / 1000; }
+    if(tOut < tAir && tAir > 22){ ete += 1.2 * 1005 * Q * (tAir - tOut) * hours / 1000; }
+    cV += pV * hours / 1000;
+  }
   return {hiv:Math.round(hiv), ete:Math.round(ete), cV:Math.round(cV), tot:Math.round(hiv+ete-cV)};
+}
+
+/* Outlet temperature for a custom air temperature in a given month (uses monthly soil temp with phase lag) */
+function cTOutSim(monthIdx, tAir){
+  const tSol = cTSoilMonth(monthIdx);
+  const L = cLPT();
+  const lam = cLam();
+  return tSol + (tAir - tSol) * Math.exp(-L / lam);
+}
+
+/* Simulator: which months are active per puits type */
+function isActiveForType(type, monthIdx){
+  if(type==='canadien') return [10,11,0,1,2].includes(monthIdx);
+  if(type==='provencal') return [4,5,6,7,8].includes(monthIdx);
+  return true;
 }
 
 function cCouts(){
@@ -385,7 +454,7 @@ function cCouts(){
   const gp = 120, bp = S.bypass ? 350 : 0;
   const ra = Math.round(150 + S.nbTuyaux * 80);
   const mainten = Math.round(S.longueur * 5 + 200);
-  return {t, tu, col, gp, bp, ra, mainten, tot: t+tu+col+gp+bp+ra};
+  return {t, tu, col, gp, bp, ra, mainten, tot: t+tu+col+gp+bp+ra+mainten};
 }
 
 /* ========================================
@@ -393,7 +462,7 @@ function cCouts(){
    ======================================== */
 function genRec(){
   const r=[], v=cVit(), dp=cDP(), z=ZONES[S.zoneClim];
-  const tOH=cTOut(z.tHiv), tOE=cTOut(z.tEte), L=cLPT(), eco=cEco();
+  const tOH=cTOutExt(true), tOE=cTOutExt(false), L=cLPT(), eco=cEco();
   const add=(t,i,ti,d)=>r.push({t,i,ti,d});
 
   // Vitesse air
@@ -494,7 +563,7 @@ function tColHex(t){
    RENDER: KPIs
    ======================================== */
 function rKPI(){
-  const z=ZONES[S.zoneClim], v=cVit(), dp=cDP(), tOH=cTOut(z.tHiv), tOE=cTOut(z.tEte), dR=cDRec(), eco=cEco(), lam=cLam();
+  const z=ZONES[S.zoneClim], v=cVit(), dp=cDP(), tOH=cTOutExt(true), tOE=cTOutExt(false), dR=cDRec(), eco=cEco(), lam=cLam();
   const kc=(val,good,warn)=>val>=good[0]&&val<=good[1]?'green':val>=warn[0]&&val<=warn[1]?'warn':'bad';
   const tp = S.typePuits;
   const hivActive = tp!=='provencal';
@@ -504,8 +573,8 @@ function rKPI(){
     {l:'Débit',v:S.debit+' m³/h',r:'Reco : '+dR, c:Math.abs(S.debit-dR)<dR*.2?'green':'warn'},
     {l:'Vitesse air',v:v.toFixed(2)+' m/s',r:'Idéal 1,5-3,5',c:kc(v,[1.5,3.5],[1,4.5])},
     {l:'Perte charge',v:dp.toFixed(0)+' Pa',r:'Acceptable <200',c:kc(dp,[0,200],[0,400])},
-    {l:'T° hiver',v:hivActive?tOH.toFixed(1)+' °C':'bypassé',r:hivActive?`Ext ${z.tHiv}°C → Sol ${cTSoilAtDepth(z.tHiv).toFixed(1)}°C`:'Air ext. direct (by-pass)',c:hivActive?(tOH>z.tHiv+3?'green':'warn'):'warn'},
-    {l:'T° été',v:eteActive?tOE.toFixed(1)+' °C':'bypassé',r:eteActive?`Ext ${z.tEte}°C → Sol ${cTSoilAtDepth(z.tEte).toFixed(1)}°C`:'Air ext. direct (by-pass)',c:eteActive?(tOE<z.tEte-3?'green':'warn'):'warn'},
+    {l:'T° hiver',v:hivActive?tOH.toFixed(1)+' °C':'bypassé',r:hivActive?`Ext ${z.tHiv}°C → Sol ${cTSoilExt(true).toFixed(1)}°C`:'Air ext. direct (by-pass)',c:hivActive?(tOH>z.tHiv+3?'green':'warn'):'warn'},
+    {l:'T° été',v:eteActive?tOE.toFixed(1)+' °C':'bypassé',r:eteActive?`Ext ${z.tEte}°C → Sol ${cTSoilExt(false).toFixed(1)}°C`:'Air ext. direct (by-pass)',c:eteActive?(tOE<z.tEte-3?'green':'warn'):'warn'},
     {l:'λ (long.car.)',v:lam.toFixed(0)+' m',r:`Par tuyau: ${cLPT().toFixed(0)}m`,c:cLPT()>lam?'green':'warn'},
     {l:'Économie',v:eco.tot+' kWh/an',r:`~${(eco.tot*.15).toFixed(0)} €/an`,c:eco.tot>200?'green':eco.tot>0?'warn':'bad'},
   ];
@@ -525,8 +594,8 @@ function rChart(){
   const z=ZONES[S.zoneClim];
   const ms=['Jan','Fév','Mar','Avr','Mai','Jun','Jui','Aoû','Sep','Oct','Nov','Déc'];
   const tE=z.tm;
-  const tS=z.tm.map(t=>cTSoilAtDepth(t));
-  const tO=tE.map(t=>cTOut(t));
+  const tS=z.tm.map((_,i)=>cTSoilMonth(i));
+  const tO=tE.map((_,i)=>cTOutMonth(i));
 
   // Active season indicator (filled bands)
   const yMin = Math.min(...tE)-3;
@@ -593,6 +662,7 @@ function rCout(){
     ['Grille prise d\'air',c.gp],
     ['By-pass motorisé',c.bp],
     ['Raccords et accessoires',c.ra],
+    ['Provision maintenance / divers',c.mainten],
   ];
   let ecoDetail = '';
   if(S.typePuits==='canadien') ecoDetail = ' (chauffage hiver seul)';
@@ -608,6 +678,59 @@ function rCout(){
       <div>Économie : <strong style="color:var(--green)">${eco.tot} kWh/an</strong>${ecoDetail}</div>
       <div>ROI : <strong style="color:var(--accent)">${roi!=='N/A'?roi+' ans':'N/A'}</strong></div>
     </div>`;
+}
+
+/* ========================================
+   RENDER: SIMULATOR
+   ======================================== */
+function rSim(){
+  const mois = parseInt(document.getElementById('iSimMois').value);
+  const tAir = parseFloat(document.getElementById('iSimT').value);
+  document.getElementById('vSimT').textContent = tAir;
+
+  const tSol = cTSoilMonth(mois);
+  const tOut = cTOutSim(mois, tAir);
+  const delta = tOut - tAir;
+  const ms = ['Jan','Fév','Mar','Avr','Mai','Jun','Jui','Aoû','Sep','Oct','Nov','Déc'];
+
+  const types = [
+    {key:'canadien', nom:'Canadien', icon:'fa-snowflake', color:'#5b8def'},
+    {key:'hybride',   nom:'Hybride',   icon:'fa-arrows-rotate', color:'var(--accent2)'},
+    {key:'provencal', nom:'Provençal', icon:'fa-sun', color:'#ef8f5b'}
+  ];
+
+  let html = `<div style="display:flex;gap:.5rem;flex-wrap:wrap;margin-bottom:.5rem">
+    <div style="flex:1;min-width:100px;background:var(--card2);border-radius:7px;padding:.5rem;text-align:center">
+      <div style="font-size:.6rem;color:var(--muted)">T° sol à ${S.profondeur.toFixed(1)} m</div>
+      <div style="font-size:1.05rem;font-weight:700;color:var(--green)">${tSol.toFixed(1)} °C</div>
+      <div style="font-size:.55rem;color:var(--muted)">${ms[mois]} · ${SOLS[S.typeSol].nom}</div>
+    </div>
+    <div style="flex:1;min-width:100px;background:var(--card2);border-radius:7px;padding:.5rem;text-align:center">
+      <div style="font-size:.6rem;color:var(--muted)">T° sortie puits</div>
+      <div style="font-size:1.05rem;font-weight:700;color:var(--accent)">${tOut.toFixed(1)} °C</div>
+      <div style="font-size:.55rem;color:var(--muted)">${MAT[S.materiau].nom} · ${S.longueur}m</div>
+    </div>
+    <div style="flex:1;min-width:100px;background:var(--card2);border-radius:7px;padding:.5rem;text-align:center">
+      <div style="font-size:.6rem;color:var(--muted)">Écart</div>
+      <div style="font-size:1.05rem;font-weight:700;color:${delta>0?'var(--red)':delta<0?'var(--green)':'var(--muted)'}">${delta>0?'+':''}${delta.toFixed(1)} °C</div>
+      <div style="font-size:.55rem;color:var(--muted)">${delta>0.5?'réchauffement':delta<-0.5?'rafraîchissement':'neutre'}</div>
+    </div>
+  </div>`;
+
+  html += `<div style="display:flex;gap:.4rem;flex-wrap:wrap">`;
+  for(const t of types){
+    const active = isActiveForType(t.key, mois);
+    const isCurrent = t.key === S.typePuits;
+    const eff = active ? (delta>0?'+':'')+delta.toFixed(1)+' °C' : '—';
+    html += `<div style="flex:1;min-width:105px;background:${isCurrent?'rgba(198,122,75,.08)':'var(--card)'};border:1px solid ${isCurrent?'var(--accent)':active?'var(--green)':'var(--border)'};border-radius:7px;padding:.45rem;text-align:center;opacity:${active?1:.5}">
+      <div style="font-size:.68rem;font-weight:600;color:${t.color};margin-bottom:.15rem"><i class="fa-solid ${t.icon}" style="margin-right:.2rem;font-size:.6rem"></i>${t.nom}</div>
+      <div style="font-size:.62rem;color:${active?(delta>0?'var(--red)':delta<0?'var(--green)':'var(--fg2)'):'var(--muted)'}">${active?eff:'bypassé'}</div>
+      <div style="font-size:.5rem;color:var(--muted);margin-top:.1rem">${active?(delta>0?'préchauffe':delta<0?'rafraîchit':'neutre'):'saison inactive'}</div>
+    </div>`;
+  }
+  html += `</div>`;
+
+  document.getElementById('simRes').innerHTML = html;
 }
 
 /* ========================================
@@ -635,8 +758,9 @@ function rPlan(){
   const pw = Math.max(3, (S.diametre / 200) * 4.5);
 
   // Temperature coloring
-  const tIn = v==='provencal'?z.tEte:z.tHiv;
-  const tOu = cTOut(tIn);
+  const isWinter = v!=='provencal';
+  const tIn = isWinter ? z.tHiv : z.tEte;
+  const tOu = cTOutExt(isWinter);
   const c1 = tCol(tIn), c2 = tCol(tOu);
 
   // Gradient ID
@@ -873,8 +997,8 @@ function rCoupe(){
   s += `<text x="${W/2}" y="${pipeY+1.5}" text-anchor="middle" fill="var(--accent2)" font-size="6" font-weight="700">Ø${S.diametre}</text>`;
 
   // Temperature label at pipe depth (show range: winter min / summer max)
-  const tSoilHiv = cTSoilAtDepth(z.tHiv);
-  const tSoilEte = cTSoilAtDepth(z.tEte);
+  const tSoilHiv = cTSoilExt(true);
+  const tSoilEte = cTSoilExt(false);
   const tSoilMoy = (tSoilHiv + tSoilEte) / 2;
   s += `<rect x="${W/2-35}" y="${pipeY-pr/2-16}" width="70" height="13" rx="3" fill="rgba(125,155,118,.12)" stroke="var(--green)" stroke-width=".7"/>`;
   s += `<text x="${W/2}" y="${pipeY-pr/2-8}" text-anchor="middle" fill="var(--green)" font-size="6.5" font-weight="700">${tSoilHiv.toFixed(1)} — ${tSoilEte.toFixed(1)} °C</text>`;
@@ -969,7 +1093,7 @@ function updateAll(preserveDebit){
     document.getElementById('iD').value = dR;
     document.getElementById('vD').textContent = dR;
   }
-  rKPI(); rChart(); rRec(); rCout(); rPlan(); rCoupe(); rVInfo(); rVComp();
+  rKPI(); rChart(); rRec(); rCout(); rPlan(); rCoupe(); rVInfo(); rVComp(); rSim();
 }
 
 /* ========================================
@@ -1030,6 +1154,10 @@ function initEvt(){
   tg.addEventListener('keydown', e=>{
     if(e.key===' '||e.key==='Enter'){ e.preventDefault(); tg.click(); }
   });
+
+  // Simulator events
+  document.getElementById('iSimMois').addEventListener('change', rSim);
+  document.getElementById('iSimT').addEventListener('input', rSim);
 }
 
 /* ========================================
@@ -1047,6 +1175,14 @@ function init(){
   ).join('');
 
   initEvt();
+
+  // Init simulator with current month and zone monthly average
+  const curMonth = new Date().getMonth();
+  document.getElementById('iSimMois').value = curMonth;
+  const defaultT = ZONES[S.zoneClim].tm[curMonth];
+  document.getElementById('iSimT').value = defaultT;
+  document.getElementById('vSimT').textContent = defaultT;
+
   updateAll(false);
 }
 
